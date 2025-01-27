@@ -7,14 +7,6 @@ interface CorrelativeRelation {
   type: 'previous' | 'next';
 }
 
-declare global {
-  class HTMLRewriter {
-    constructor();
-    on(selector: string, handlers: ElementHandler | TextHandler): this;
-    transform(response: Response): Response;
-  }
-}
-
 interface ElementHandler {
   element(element: Element): void;
 }
@@ -183,14 +175,14 @@ export class CareerService {
             correlativeRelations.push({
               subjectCode: currentCode,
               correlativeCode: parentCode,
-              type: 'next'  // Invertido: el padre es correlativa posterior
+              type: 'previous'  // Invertido: el padre es correlativa posterior
             });
           } else {
             // En árbol normal, el padre tiene como correlativa previa al nodo actual
             correlativeRelations.push({
               subjectCode: parentCode,
               correlativeCode: currentCode,
-              type: 'previous'  // El nodo actual es correlativa previa del padre
+              type: 'next'  // El nodo actual es correlativa previa del padre
             });
           }
         });
@@ -201,7 +193,6 @@ export class CareerService {
   }
 
   private static applyCorrelativeRelations(career: Career, relations: CorrelativeRelation[]): void {
-    // Crear un mapa para detectar relaciones duplicadas o inválidas
     const relationMap = new Map<string, Set<string>>();
     
     // Inicializar el mapa
@@ -209,43 +200,67 @@ export class CareerService {
       relationMap.set(`${subject.code}_prev`, new Set());
       relationMap.set(`${subject.code}_next`, new Set());
     });
-
+    const hasCircularDependency = (source: string, target: string): boolean => {
+      const visited = new Set<string>();
+      const queue = [target];
+      
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        if (current === source) return true;
+        
+        const nextRelations = relationMap.get(`${current}_next`);
+        if (nextRelations) {
+          nextRelations.forEach(code => {
+            if (!visited.has(code)) {
+              visited.add(code);
+              queue.push(code);
+            }
+          });
+        }
+      }
+      return false;
+    };
     // Primera pasada: validar y registrar relaciones
     relations.forEach(relation => {
       const subject = career.subjects.find(s => s.code === relation.subjectCode);
       const correlative = career.subjects.find(s => s.code === relation.correlativeCode);
       
       if (!subject || !correlative) return;
-
-      // Si es tipo 'previous', significa que correlativeCode es previa de subjectCode
-      // Si es tipo 'next', significa que correlativeCode es posterior a subjectCode
-      const key = `${relation.subjectCode}_${relation.type}`;
-      const inverseKey = `${relation.correlativeCode}_${relation.type === 'previous' ? 'next' : 'previous'}`;
-      
-      // Verificar si la materia ya está en la lista opuesta
-      const oppositeKey = `${relation.subjectCode}_${relation.type === 'previous' ? 'next' : 'previous'}`;
-      if (relationMap.get(oppositeKey)?.has(relation.correlativeCode)) {
-        console.warn(`Relación inválida detectada: ${relation.subjectCode} y ${relation.correlativeCode} no pueden ser correlativas mutuas`);
+  
+      // Validación 1: Relaciones directas
+      const existingRelations = [
+        relationMap.get(`${relation.subjectCode}_prev`)?.has(relation.correlativeCode),
+        relationMap.get(`${relation.subjectCode}_next`)?.has(relation.correlativeCode),
+        relationMap.get(`${relation.correlativeCode}_prev`)?.has(relation.subjectCode),
+        relationMap.get(`${relation.correlativeCode}_next`)?.has(relation.subjectCode)
+      ];
+  
+      if (existingRelations.some(Boolean)) {
+        console.warn(`Relación inválida: ${relation.subjectCode} <-> ${relation.correlativeCode}`);
         return;
       }
-
-      // Agregar la relación al mapa
+  
+      // Validación 2: Dependencias circulares
+      if (hasCircularDependency(relation.subjectCode, relation.correlativeCode)) {
+        console.warn(`Dependencia circular: ${relation.subjectCode} -> ${relation.correlativeCode}`);
+        return;
+      }
+  
+      // Agregar relaciones válidas
       if (relation.type === 'previous') {
-        // correlativeCode es previa de subjectCode
         relationMap.get(`${relation.subjectCode}_prev`)?.add(relation.correlativeCode);
         relationMap.get(`${relation.correlativeCode}_next`)?.add(relation.subjectCode);
       } else {
-        // correlativeCode es posterior a subjectCode
         relationMap.get(`${relation.subjectCode}_next`)?.add(relation.correlativeCode);
         relationMap.get(`${relation.correlativeCode}_prev`)?.add(relation.subjectCode);
       }
     });
-
+  
     // Segunda pasada: aplicar las relaciones validadas
     career.subjects.forEach(subject => {
       const prevSet = relationMap.get(`${subject.code}_prev`);
       const nextSet = relationMap.get(`${subject.code}_next`);
-
+  
       if (prevSet) {
         subject.correlatives.previous = Array.from(prevSet).map(code => {
           const correlative = career.subjects.find(s => s.code === code);
@@ -255,7 +270,7 @@ export class CareerService {
           };
         });
       }
-
+  
       if (nextSet) {
         subject.correlatives.next = Array.from(nextSet).map(code => {
           const correlative = career.subjects.find(s => s.code === code);
@@ -265,13 +280,6 @@ export class CareerService {
           };
         });
       }
-    });
-
-    // Intercambiar previous y next en todas las materias
-    career.subjects.forEach(subject => {
-      const temp = subject.correlatives.previous;
-      subject.correlatives.previous = subject.correlatives.next;
-      subject.correlatives.next = temp;
     });
   }
 }
