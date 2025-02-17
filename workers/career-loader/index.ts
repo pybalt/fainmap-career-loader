@@ -38,6 +38,11 @@ interface Career {
   totalYears: number;
 }
 
+interface ProcessHtmlPayload {
+  html: string;
+  faculty: string;
+}
+
 export interface Env {
   // Define your environment variables here
 }
@@ -86,7 +91,8 @@ export default {
 
     try {
       const url = new URL(request.url);
-      const htmlContent = await request.text();
+      const payload = await request.json() as ProcessHtmlPayload;
+      const { html: htmlContent, faculty: selectedFaculty } = payload;
       
       if (!htmlContent) {
         throw new Error('El contenido HTML está vacío');
@@ -109,12 +115,19 @@ export default {
                            htmlContent.match(/IdCarrera=(\d+)/i)?.[1];
       const careerId = careerIdMatch || 'unknown';
 
-      const facultyIdMatch = url.searchParams.get('IdFacultad') || 
-                           htmlContent.match(/IdFacultad=(\d+)/i)?.[1];
-      
+      // Usar la facultad seleccionada en lugar de intentar extraerla del HTML
+      const facultyMap: Record<string, string> = {
+        'FAIN': 'Facultad de Ingeniería y Ciencias Exactas',
+        'FACE': 'Facultad de Ciencias Económicas',
+        'FADI': 'Facultad de Arquitectura y Diseño',
+        'FACO': 'Facultad de Comunicación',
+        'FAJU': 'Facultad de Ciencias Jurídicas y Sociales',
+        'FASA': 'Facultad de Ciencias de la Salud'
+      };
+
       const faculty = {
-        id: facultyIdMatch || 'unknown',
-        name: `Facultad ${facultyIdMatch || 'Desconocida'}`
+        id: selectedFaculty,
+        name: facultyMap[selectedFaculty] || `Facultad ${selectedFaculty}`
       };
 
       // Obtener información del plan

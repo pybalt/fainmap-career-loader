@@ -1,13 +1,41 @@
 import { NextResponse } from 'next/server'
 
+const WORKER_URL = process.env.WORKER_URL || 'http://localhost:8787'
+
 export async function POST(req: Request) {
-  const { html, faculty } = await req.json()
+  try {
+    const { html, faculty } = await req.json()
 
-  // Here you would implement the logic to process the HTML
-  // For now, we'll just simulate a delay
-  await new Promise(resolve => setTimeout(resolve, 1000))
+    if (!html) {
+      return NextResponse.json({ error: 'El HTML es requerido' }, { status: 400 })
+    }
 
-  // Return a success response
-  return NextResponse.json({ message: 'HTML processed successfully' })
+    if (!faculty) {
+      return NextResponse.json({ error: 'La facultad es requerida' }, { status: 400 })
+    }
+
+    // Enviar al worker
+    const response = await fetch(WORKER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+      body: JSON.stringify({ html, faculty }),
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      return NextResponse.json(error, { status: response.status })
+    }
+
+    const data = await response.json()
+    return NextResponse.json(data)
+  } catch (error) {
+    console.error('Error procesando el HTML:', error)
+    return NextResponse.json(
+      { error: 'Error interno del servidor' },
+      { status: 500 }
+    )
+  }
 }
 
