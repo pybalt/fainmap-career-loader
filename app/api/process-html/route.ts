@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 
 export async function POST(req: Request) {
-  const { html } = await req.json()
+  const { html, faculty } = await req.json()
 
   // Here you would implement the logic to process the HTML
   // For now, we'll just simulate a delay
