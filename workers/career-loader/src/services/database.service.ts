@@ -7,6 +7,21 @@ interface SupabaseResult {
   error: any;
 }
 
+// Interfaces para los tipos de retorno
+interface SaveCareerResponse {
+  success: boolean;
+  message: string;
+  stats: {
+    totalSubjects?: number;
+    validSubjects?: number;
+    correlatives?: number;
+    errors?: number;
+    errorDetails?: any[];
+    timestamp: string;
+    [key: string]: any;
+  };
+}
+
 export class DatabaseService {
   private supabase: SupabaseClient;
 
@@ -23,7 +38,7 @@ export class DatabaseService {
     return new DatabaseService(env.SUPABASE_URL, env.SUPABASE_KEY);
   }
 
-  async saveCareer(career: Career): Promise<{ success: boolean; message: string; stats: any }> {
+  async saveCareer(career: Career): Promise<SupabaseResult | { success: boolean; message: string; stats: any }> {
     // Verificar si el objeto es seguro para guardar
     if (!career.safe) {
       console.warn('Se intentó guardar una carrera no marcada como segura:', career.id, career.name);
@@ -64,7 +79,6 @@ export class DatabaseService {
     console.log(`Materias válidas: ${validSubjects.length} de ${career.subjects.length}`);
     
     const subjectsData = validSubjects.map(s => ({
-      subjectid: parseInt(s.id.replace(/\D/g, '')),
       code: s.code,
       name: s.name
     }));
@@ -72,13 +86,8 @@ export class DatabaseService {
     // Mostrar algunas materias de ejemplo
     console.log('Ejemplo de materias preparadas:', subjectsData.slice(0, 2));
     
-    // 4. Relaciones carrera-materia
-    const careerSubjectsData = validSubjects.map(s => ({
-      careerid: careerId,
-      subjectid: parseInt(s.id.replace(/\D/g, '')),
-      suggested_year: s.year,
-      suggested_quarter: s.semester
-    }));
+    // No creamos ahora las relaciones carrera-materia porque necesitamos primero los IDs reales
+    // Estas se crearán después de obtener los subjects insertados
 
     // Crear colección para errores
     const errors: any[] = [];
@@ -133,51 +142,87 @@ export class DatabaseService {
       })
       .then((subjectsResult: SupabaseResult) => {
         if (subjectsResult.error) {
-          console.error('Error al guardar materias:', subjectsResult.error);
-          errors.push(subjectsResult.error);
-          throw new Error('Error al guardar materias');
+          console.error('Error al guardar subjects:', subjectsResult.error);
+          return Promise.resolve({ data: null, error: subjectsResult.error } as SupabaseResult);
+        }
+
+        // Log cuántos subjects se insertaron realmente
+        console.log(`Subjects guardados correctamente. Datos retornados:`, 
+          subjectsResult.data ? `${subjectsResult.data.length} registros` : 'Sin datos');
+        
+        // Diagnóstico completo de los datos retornados
+        console.log('Estructura completa de datos retornados por Supabase:');
+        console.log(JSON.stringify(subjectsResult, null, 2));
+
+        // Verificar que subjects sean válidos antes de continuar
+        if (!subjectsResult.data || subjectsResult.data.length === 0) {
+          console.warn('No se insertaron subjects, saltando la inserción de career_subjects');
+          return Promise.resolve({ 
+            data: { career: career, subjectsInserted: 0, relationsInserted: 0 }, 
+            error: null 
+          } as SupabaseResult);
+        }
+
+        // 4. Procesar y guardar relaciones carrera-materia
+        console.log(`Preparando relaciones carrera-materia para ${validSubjects.length} materias válidas...`);
+
+        // Diagnóstico de las materias de entrada
+        console.log('Códigos de materias originales:');
+        validSubjects.forEach(s => console.log(`- ${s.code}`));
+
+        // Diagnóstico de las materias retornadas
+        console.log('Códigos de materias retornados por Supabase:');
+        subjectsResult.data.forEach((s: any) => console.log(`- ${s.code} (ID: ${s.subjectid})`));
+
+        // En mapear subjects con IDs
+        const subjectIdMap = new Map<string, number>();
+        console.log(`Datos recibidos de la consulta: ${subjectsResult.data.length} materias`);
+        console.log('Primeros 3 registros de la consulta:', JSON.stringify(subjectsResult.data.slice(0, 3), null, 2));
+        
+        // Verificar si faltan materias
+        const codigosInsertados = new Set(subjectsResult.data.map((s: any) => s.code));
+        const materiasFaltantes = validSubjects.filter(s => !codigosInsertados.has(s.code));
+        
+        if (materiasFaltantes.length > 0) {
+          console.warn(`Faltan ${materiasFaltantes.length} materias en la respuesta de Supabase:`);
+          materiasFaltantes.forEach(s => console.warn(`- Falta: ${s.code} (${s.name})`));
+          
+          // Intentar una consulta directa para las materias faltantes
+          console.log('Realizando consulta adicional para las materias faltantes...');
+          
+          // Cargamos primero las materias que sí tenemos
+          subjectsResult.data.forEach((subject: any) => {
+            console.log(`Mapeando code '${subject.code}' al ID ${subject.subjectid}`);
+            subjectIdMap.set(subject.code, subject.subjectid);
+          });
+          
+          // Ahora intentamos recuperar las materias faltantes
+          const codigosFaltantes = materiasFaltantes.map(s => s.code);
+          return this.buscarMateriasPorCodigo(codigosFaltantes)
+            .then(materiasFaltantesResult => {
+              if (materiasFaltantesResult.data && materiasFaltantesResult.data.length > 0) {
+                console.log(`Recuperadas ${materiasFaltantesResult.data.length} materias adicionales`);
+                
+                // Agregar al mapa las materias recuperadas
+                materiasFaltantesResult.data.forEach((subject: any) => {
+                  console.log(`Mapeando code adicional '${subject.code}' al ID ${subject.subjectid}`);
+                  subjectIdMap.set(subject.code, subject.subjectid);
+                });
+              } else {
+                console.warn('No se pudieron recuperar las materias faltantes');
+              }
+              
+              return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
+            });
         }
         
-        console.log(`Materias insertadas: ${subjectsResult.data ? subjectsResult.data.length : 0}`);
-        
-        // 4. Insertar relaciones carrera-materia
-        if (careerSubjectsData.length > 0) {
-          console.log(`Insertando ${careerSubjectsData.length} relaciones carrera-materia...`);
-          return this.supabase
-            .from('career_subjects')
-            .upsert(careerSubjectsData)
-            .select();
-        }
-        return { data: null, error: null } as SupabaseResult;
-      })
-      .then(async (relationsResult: SupabaseResult) => {
-        if (relationsResult.error) {
-          console.error('Error al guardar relaciones:', relationsResult.error);
-          errors.push(relationsResult.error);
-        }
-        
-        console.log(`Relaciones insertadas: ${relationsResult.data ? relationsResult.data.length : 0}`);
-        
-        // 5. Procesar correlativas solo si no hay errores
-        if (errors.length === 0) {
-          console.log('Procesando correlativas...');
-          await this.processPrerequistesInBulk(career, validSubjects);
-        }
-        
-        return {
-          success: errors.length === 0,
-          message: errors.length === 0 
-            ? 'Datos guardados correctamente' 
-            : 'Algunos datos no pudieron guardarse correctamente',
-          stats: {
-            totalSubjects: career.subjects.length,
-            validSubjects: validSubjects.length,
-            correlatives: this.countCorrelatives(validSubjects),
-            errors: errors.length,
-            errorDetails: errors.length > 0 ? errors : undefined,
-            timestamp: new Date().toISOString()
-          }
-        };
+        // Asociamos cada código de materia con su ID real en la base de datos
+        subjectsResult.data.forEach((subject: any) => {
+          console.log(`Mapeando code '${subject.code}' al ID ${subject.subjectid}`);
+          subjectIdMap.set(subject.code, subject.subjectid);
+        });
+
+        return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
       })
       .catch(error => {
         console.error('Error fatal en el flujo de guardado:', error);
@@ -213,114 +258,490 @@ export class DatabaseService {
     }
   }
   
-  private countCorrelatives(subjects: Subject[]): number {
-    return subjects.reduce((count, subject) => 
-      count + (subject.correlatives.previous?.length || 0), 0);
-  }
-  
-  private async processPrerequistesInBulk(career: Career, subjects: Subject[]): Promise<void> {
-    if (subjects.length === 0) {
-      console.log('No hay materias válidas para procesar correlativas');
-      return;
+  /**
+   * Cuenta el número total de correlativas en una lista de materias
+   * @param subjects Lista de materias
+   * @returns Número total de correlativas
+   */
+  private countCorrelatives(subjects: any[]): number {
+    if (!subjects || !Array.isArray(subjects)) return 0;
+    
+    console.log(`Analizando correlativas de ${subjects.length} materias...`);
+    
+    // Revisar la estructura completa de las correlativas para diagnóstico
+    for (let i = 0; i < Math.min(5, subjects.length); i++) {
+      const subject = subjects[i];
+      console.log(`Materia ${i+1} (código ${subject.code}, nombre: ${subject.name}):`);
+      console.log('Estructura de correlativas:', JSON.stringify(subject.correlatives || {}, null, 2));
     }
     
+    // Contamos materias con correlativas en el formato correcto
+    let totalPrevious = 0;
+    let totalNext = 0;
+    let materiasConCorrelativasPrevias = 0;
+    let materiasConCorrelativasNext = 0;
+    
+    for (const subject of subjects) {
+      // Verificar si tiene correlativas en el formato objeto.previous/next
+      if (subject.correlatives && typeof subject.correlatives === 'object') {
+        // Contar correlativas previas (prerrequisitos)
+        if (subject.correlatives.previous && Array.isArray(subject.correlatives.previous)) {
+          const previousCount = subject.correlatives.previous.length;
+          if (previousCount > 0) {
+            totalPrevious += previousCount;
+            materiasConCorrelativasPrevias++;
+            console.log(`Materia ${subject.code} tiene ${previousCount} correlativas previas`);
+          }
+        }
+        
+        // Contar correlativas siguientes (para diagnóstico)
+        if (subject.correlatives.next && Array.isArray(subject.correlatives.next)) {
+          const nextCount = subject.correlatives.next.length;
+          if (nextCount > 0) {
+            totalNext += nextCount;
+            materiasConCorrelativasNext++;
+            console.log(`Materia ${subject.code} tiene ${nextCount} correlativas siguientes`);
+          }
+        }
+      }
+    }
+    
+    console.log(`Estadísticas de correlativas:
+      - ${materiasConCorrelativasPrevias} materias tienen ${totalPrevious} correlativas previas (prerrequisitos)
+      - ${materiasConCorrelativasNext} materias tienen ${totalNext} correlativas siguientes
+      - Total: ${materiasConCorrelativasPrevias + materiasConCorrelativasNext} materias con algún tipo de correlativa`);
+    
+    // Retornamos solo el total de prerrequisitos (correlativas previas) que son los que procesamos
+    return totalPrevious;
+  }
+  
+  /**
+   * Procesa las correlativas de las materias en lotes
+   * @param career Objeto de carrera
+   * @param subjects Lista de materias
+   * @returns Objeto con resultado del procesamiento
+   */
+  private async processPrerequistesInBulk(career: any, subjects: any[]): Promise<SupabaseResult> {
+    console.log(`Procesando correlativas para ${subjects.length} materias...`);
+    
+    // Si no hay materias, retornar éxito vacío
+    if (!subjects || subjects.length === 0) {
+      console.log('No hay materias para procesar correlativas');
+      return {
+        data: {
+          success: true,
+          message: 'No hay materias para procesar correlativas',
+          stats: {
+            timestamp: new Date().toISOString()
+          }
+        },
+        error: null
+      };
+    }
+    
+    // Contar cuantas materias tienen correlativas
+    const totalCorrelativas = this.countCorrelatives(subjects);
+    console.log(`Total de correlativas a procesar: ${totalCorrelativas}`);
+    
+    if (totalCorrelativas === 0) {
+      console.log('No hay correlativas para procesar');
+      return {
+        data: {
+          success: true,
+          message: 'No hay correlativas para procesar',
+          stats: {
+            timestamp: new Date().toISOString()
+          }
+        },
+        error: null
+      };
+    }
+    
+    // Extraer códigos de materia para consultar
+    const subjectCodes = subjects.map(s => s.code);
+    console.log(`Consultando IDs para ${subjectCodes.length} códigos de materias...`);
+    
     try {
-      // 1. Obtener todos los códigos e IDs de materias de una sola vez
-      const allCodes = new Set<string>();
-      
-      // Agregar códigos de todas las materias y sus correlativas
-      subjects.forEach(subject => {
-        allCodes.add(subject.code);
-        subject.correlatives.previous.forEach(c => {
-          if (c.code) allCodes.add(c.code);
-        });
-      });
-      
-      console.log(`Consultando ${allCodes.size} códigos de materias para correlativas...`);
-      
-      const { data: subjectsData, error: subjectsQueryError } = await this.supabase
+      // Obtener IDs de materias desde la base de datos
+      const { data: subjectsFromDB, error } = await this.supabase
         .from('subjects')
         .select('subjectid, code')
-        .in('code', Array.from(allCodes));
+        .in('code', subjectCodes);
       
-      if (subjectsQueryError) {
-        console.error('Error al consultar materias para correlativas:', subjectsQueryError);
-        return;
+      if (error) {
+        console.error('Error al consultar materias:', error);
+        return {
+          data: {
+            success: false,
+            message: 'Error al consultar materias para correlativas',
+            stats: {
+              error: error.message,
+              timestamp: new Date().toISOString()
+            }
+          },
+          error: error
+        };
       }
       
-      if (!subjectsData || subjectsData.length === 0) {
-        console.warn('No se encontraron materias para establecer correlativas');
-        return;
+      if (!subjectsFromDB || subjectsFromDB.length === 0) {
+        console.error('No se encontraron materias en la base de datos');
+        return {
+          data: {
+            success: false,
+            message: 'No se encontraron materias en la base de datos',
+            stats: {
+              timestamp: new Date().toISOString()
+            }
+          },
+          error: new Error('No se encontraron materias en la base de datos')
+        };
       }
       
-      console.log(`Se encontraron ${subjectsData.length} materias de ${allCodes.size} códigos buscados`);
+      // Mapear código de materia a ID
+      const subjectMap = new Map();
+      subjectsFromDB.forEach(s => subjectMap.set(s.code, s.subjectid));
       
-      // Crear un mapa para búsqueda rápida
-      const codeToId = new Map<string, number>();
-      subjectsData.forEach(s => codeToId.set(s.code, s.subjectid));
+      // Estadísticas para el log
+      let correlativasEncontradas = 0;
+      let correlativasFaltantes = 0;
+      let materiasFaltantes = 0;
       
-      // 2. Preparar todas las correlativas en una sola operación
-      const prerequisitesData = [];
-      const careerId = parseInt(career.id);
+      // Procesar correlativas para cada materia
+      const correlativesData = [];
+      const careerId = career.id ? parseInt(career.id) : null;
       
-      // Contar correlativas disponibles para diagnosticar posibles problemas
-      let correlativesFound = 0;
-      let correlativesMissing = 0;
-      let subjectsMissing = 0;
+      // Validar careerId
+      if (!careerId) {
+        console.error('Error: No se puede procesar correlativas sin un careerId válido');
+        return {
+          data: {
+            success: false,
+            message: 'No se puede procesar correlativas sin un careerId válido',
+            stats: {
+              timestamp: new Date().toISOString()
+            }
+          },
+          error: new Error('careerId inválido para correlativas')
+        };
+      }
       
       for (const subject of subjects) {
-        const subjectId = codeToId.get(subject.code);
-        if (!subjectId) {
-          console.warn(`No se encontró el ID para la materia ${subject.code}`);
-          subjectsMissing++;
+        // Verificar si tiene el formato correcto de correlativas (objeto con previous)
+        const hasCorrelatives = subject.correlatives && 
+                             typeof subject.correlatives === 'object' && 
+                             subject.correlatives.previous &&
+                             Array.isArray(subject.correlatives.previous);
+                             
+        if (!hasCorrelatives) {
           continue;
         }
         
-        for (const correlative of subject.correlatives.previous) {
-          if (!correlative.code) continue;
+        const subjectId = subjectMap.get(subject.code);
+        if (!subjectId) {
+          console.warn(`Materia no encontrada para correlativas: ${subject.code}`);
+          materiasFaltantes++;
+          continue;
+        }
+        
+        // Procesar cada correlativa previa (prerequisito)
+        for (const prerequisite of subject.correlatives.previous) {
+          const prerequisiteCode = prerequisite.code;
           
-          const correlativeId = codeToId.get(correlative.code);
-          if (!correlativeId) {
-            console.warn(`No se encontró el ID para la correlativa ${correlative.code} de la materia ${subject.code}`);
-            correlativesMissing++;
+          if (!prerequisiteCode) {
+            console.warn(`Correlativa sin código para materia ${subject.code}`);
             continue;
           }
           
-          correlativesFound++;
+          const prerequisiteId = subjectMap.get(prerequisiteCode);
           
-          prerequisitesData.push({
-            careerid: careerId,
+          if (!prerequisiteId) {
+            console.warn(`Correlativa no encontrada: ${prerequisiteCode} para materia ${subject.code}`);
+            correlativasFaltantes++;
+            continue;
+          }
+          
+          correlativesData.push({
             subjectid: subjectId,
-            prerequisite_subjectid: correlativeId
+            prerequisite_subjectid: prerequisiteId,
+            careerid: careerId
           });
+          
+          correlativasEncontradas++;
         }
       }
       
-      console.log(`Estadísticas de correlativas: 
-        Encontradas: ${correlativesFound},
-        No encontradas: ${correlativesMissing},
-        Materias no encontradas: ${subjectsMissing}`);
+      console.log(`Estadísticas de correlativas:
+        - Encontradas: ${correlativasEncontradas}
+        - Correlativas faltantes: ${correlativasFaltantes}
+        - Materias faltantes: ${materiasFaltantes}`);
       
-      // 3. Insertar todas las correlativas de una vez
-      if (prerequisitesData.length > 0) {
-        console.log(`Intentando guardar ${prerequisitesData.length} correlativas...`);
-        
-        const { data: prereqResponseData, error: prereqError } = await this.supabase
-          .from('prerequisites')
-          .upsert(prerequisitesData)
-          .select();
-        
-        if (prereqError) {
-          console.error('Error al guardar correlativas:', prereqError);
-        } else {
-          console.log(`Correlativas guardadas exitosamente:`, 
-            prereqResponseData ? `${prereqResponseData.length} registros` : 'Sin detalle de respuesta');
-        }
-      } else {
-        console.log('No hay correlativas para guardar');
+      // Si no hay correlativas para insertar, retornar
+      if (correlativesData.length === 0) {
+        return {
+          data: {
+            success: true,
+            message: 'No hay correlativas válidas para insertar',
+            stats: {
+              totalCorrelativas,
+              correlativasEncontradas,
+              correlativasFaltantes,
+              materiasFaltantes,
+              timestamp: new Date().toISOString()
+            }
+          },
+          error: null
+        };
       }
+      
+      // Insertar correlativas
+      console.log(`Insertando ${correlativesData.length} correlativas...`);
+      const { data: result, error: insertError } = await this.supabase
+        .from('prerequisites')
+        .upsert(correlativesData)
+        .select();
+      
+      if (insertError) {
+        console.error('Error al insertar correlativas:', insertError);
+        return {
+          data: {
+            success: false,
+            message: 'Error al insertar correlativas',
+            stats: {
+              totalCorrelativas,
+              correlativasEncontradas,
+              correlativasFaltantes,
+              materiasFaltantes,
+              timestamp: new Date().toISOString(),
+              error: insertError.message
+            }
+          },
+          error: insertError
+        };
+      }
+      
+      console.log(`Correlativas insertadas correctamente: ${result ? result.length : 0}`);
+      return {
+        data: {
+          success: true,
+          message: 'Correlativas insertadas correctamente',
+          stats: {
+            totalCorrelativas,
+            correlativasEncontradas,
+            correlativasFaltantes,
+            materiasFaltantes,
+            insertadas: result ? result.length : 0,
+            timestamp: new Date().toISOString()
+          }
+        },
+        error: null
+      };
+      
     } catch (error) {
-      console.error('Error al procesar correlativas:', error);
+      console.error('Error grave al procesar correlativas:', error);
+      return {
+        data: {
+          success: false,
+          message: 'Error grave al procesar correlativas',
+          stats: {
+            error: error instanceof Error ? error.message : String(error),
+            timestamp: new Date().toISOString()
+          }
+        },
+        error
+      };
     }
+  }
+
+  private async insertCareerSubjectsInBatches(relationships: any[]): Promise<SupabaseResult> {
+    const batchSize = 5;
+    const totalBatches = Math.ceil(relationships.length / batchSize);
+    const errors: any[] = [];
+    let insertedCount = 0;
+
+    console.log(`Procesando ${relationships.length} relaciones en ${totalBatches} lotes de tamaño ${batchSize}`);
+
+    for (let i = 0; i < totalBatches; i++) {
+      const batch = relationships.slice(i * batchSize, (i + 1) * batchSize);
+      console.log(`Procesando lote ${i + 1} de ${totalBatches} con ${batch.length} relaciones...`);
+
+      try {
+        // Usar upsert directo ya que la función RPC no existe
+        const { data: upsertResult, error: upsertError } = await this.supabase
+          .from('career_subjects')
+          .upsert(batch);
+        
+        if (upsertError) {
+          console.error(`Error en upsert directo (lote ${i + 1}):`, upsertError);
+          errors.push(upsertError);
+          
+          // Intentar insertar uno por uno como último recurso
+          console.log(`Intentando insertar uno por uno en lote ${i + 1}...`);
+          for (const relationship of batch) {
+            try {
+              const { error: singleError } = await this.supabase
+                .from('career_subjects')
+                .upsert(relationship);
+              
+              if (!singleError) {
+                insertedCount++;
+              } else {
+                console.error(`Error en inserción individual:`, singleError);
+                errors.push(singleError);
+              }
+            } catch (error) {
+              console.error(`Error grave en inserción individual:`, error);
+            }
+          }
+        } else {
+          console.log(`Upsert directo exitoso para lote ${i + 1}`);
+          insertedCount += batch.length;
+        }
+      } catch (error) {
+        console.error(`Error grave en lote ${i + 1}:`, error);
+        errors.push(error);
+      }
+      
+      // Esperar un momento entre lotes para no sobrecargar Supabase
+      if (i < totalBatches - 1) {
+        console.log(`Esperando 100ms antes del siguiente lote...`);
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    console.log(`Proceso completo. Insertadas ${insertedCount} de ${relationships.length} relaciones`);
+    
+    return {
+      data: { insertedCount, totalCount: relationships.length },
+      error: errors.length > 0 ? errors : null
+    };
+  }
+
+  /**
+   * Busca materias por código directamente en la base de datos
+   */
+  private async buscarMateriasPorCodigo(codigos: string[]): Promise<SupabaseResult> {
+    if (!codigos || codigos.length === 0) {
+      return { data: [], error: null };
+    }
+    
+    console.log(`Buscando ${codigos.length} materias por código...`);
+    try {
+      return await this.supabase
+        .from('subjects')
+        .select('subjectid, code, name')
+        .in('code', codigos);
+    } catch (error) {
+      console.error('Error al buscar materias por código:', error);
+      return { data: [], error };
+    }
+  }
+  
+  /**
+   * Continúa el procesamiento de relaciones una vez que tenemos los IDs de materias
+   */
+  private continuarProcesamientoRelaciones(
+    career: any, 
+    careerId: number, 
+    validSubjects: any[], 
+    subjectIdMap: Map<string, number>, 
+    errors: any[]
+  ): Promise<SupabaseResult> {
+    // Verificar que tenemos el careerId
+    if (!careerId || isNaN(careerId)) {
+      console.error('Error: careerId es inválido:', careerId);
+      return Promise.resolve({
+        data: null, 
+        error: new Error(`careerId inválido: ${careerId}`)
+      } as SupabaseResult);
+    }
+
+    // AHORA generamos las relaciones usando los IDs reales de la DB
+    const careerSubjectsData = validSubjects
+      .filter(subject => {
+        const hasId = subjectIdMap.has(subject.code);
+        if (!hasId) {
+          console.warn(`Advertencia: No se encontró ID para subject code ${subject.code}`);
+        }
+        return hasId;
+      })
+      .map(subject => {
+        const subjectId = subjectIdMap.get(subject.code);
+        return {
+          careerid: careerId,
+          subjectid: subjectId,
+          suggested_year: subject.year || 1,
+          suggested_quarter: subject.semester || 1,
+          is_optional: subject.isOptional || false
+        };
+      });
+
+    console.log(`Se prepararon ${careerSubjectsData.length} relaciones carrera-materia`);
+    
+    // Verificar si hay relaciones para insertar
+    if (careerSubjectsData.length === 0) {
+      console.warn('No hay relaciones carrera-materia para insertar');
+      return Promise.resolve({ 
+        data: { career: career, subjectsInserted: validSubjects.length, relationsInserted: 0 },
+        error: null 
+      } as SupabaseResult);
+    }
+
+    // Mostrar un ejemplo de la estructura de datos que se va a insertar
+    console.log('Estructura de ejemplo de relación carrera-materia:', 
+      JSON.stringify(careerSubjectsData[0], null, 2));
+
+    // Proceder con la inserción en lotes
+    return this.insertCareerSubjectsInBatches(careerSubjectsData)
+      .then((relationsResult: SupabaseResult) => {
+        if (relationsResult.error) {
+          console.error('Error al guardar relaciones carrera-materia:', relationsResult.error);
+          return { 
+            data: { 
+              career: career, 
+              subjectsInserted: validSubjects.length, 
+              relationsInserted: 0 
+            }, 
+            error: relationsResult.error 
+          } as SupabaseResult;
+        }
+
+        console.log(`Relaciones carrera-materia guardadas correctamente:`, 
+          relationsResult.data ? 
+          `${relationsResult.data.insertedCount} de ${relationsResult.data.totalCount}` : 
+          'Sin detalle de respuesta');
+
+        // 5. Procesar correlativas solo si todo lo anterior fue exitoso
+        if (errors.length === 0) {
+          console.log('Procesando correlativas...');
+          return this.processPrerequistesInBulk(career, validSubjects)
+            .then((correlativesResponse: SaveCareerResponse | SupabaseResult) => {
+              // Unificar formato de respuesta para processPrerequistesInBulk
+              const correlativesResult = 'success' in correlativesResponse 
+                ? { data: correlativesResponse, error: null } as SupabaseResult
+                : correlativesResponse;
+
+              return {
+                data: {
+                  career: career,
+                  subjectsInserted: validSubjects.length,
+                  relationsInserted: careerSubjectsData.length,
+                  correlativesResult: correlativesResult.data
+                },
+                error: correlativesResult.error
+              } as SupabaseResult;
+            });
+        }
+
+        // Si hay errores, no procesamos correlativas
+        return {
+          data: {
+            career: career,
+            subjectsInserted: validSubjects.length,
+            relationsInserted: careerSubjectsData.length,
+            errors: errors
+          },
+          error: errors.length > 0 ? errors[0] : null
+        } as SupabaseResult;
+      });
   }
 } 
