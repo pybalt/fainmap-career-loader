@@ -7,3 +7,5 @@ watch_dir = "src"
 
 [env.production]
 workers_dev = true 
+SUPABASE_URL = "https://dynucshtnfpcoafcvoac.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR5bnVjc2h0bmZwY29hZmN2b2FjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzc4NDk0NTgsImV4cCI6MjA1MzQyNTQ1OH0.AFcbQ5ITTaAo_bq3Peau-gtkgeemECNaoq7ZCvCtZh8"

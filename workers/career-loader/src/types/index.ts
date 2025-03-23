@@ -35,10 +35,13 @@ export interface Career {
   };
   subjects: Subject[];
   totalYears: number;
+  safe?: boolean; // Indica si es seguro guardar en la base de datos
 }
 
 export interface Env {
-  // Define your environment variables here
+  // Variables de entorno para Supabase
+  SUPABASE_URL?: string;
+  SUPABASE_KEY?: string;
 }
 
 export type ExecutionContext = {

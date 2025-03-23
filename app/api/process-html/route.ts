@@ -14,13 +14,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'La facultad es requerida' }, { status: 400 })
     }
 
-    // Enviar al worker
-    const response = await fetch(WORKER_URL, {
+    // Construir la URL con el parámetro de facultad
+    const workerURL = new URL(WORKER_URL);
+    workerURL.searchParams.append('facultyId', faculty);
+    workerURL.searchParams.append('saveToDb', 'true');
+
+    // Enviar al worker el HTML plano
+    const response = await fetch(workerURL.toString(), {
       method: 'POST',
       headers: {
-        'Content-Type': 'text/plain',
+        'Content-Type': 'text/plain', // Enviar como texto plano
       },
-      body: JSON.stringify({ html, faculty }),
+      body: html, // Solo enviar el HTML, sin JSON
     })
 
     if (!response.ok) {

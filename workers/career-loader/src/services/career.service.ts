@@ -24,7 +24,24 @@ export class CareerService {
     const relations = this.extractCorrelativeRelations(html);
     
     // Debug: Mostrar las relaciones extraídas
-    console.log('Relaciones extraídas:', relations);
+    // console.log('Relaciones extraídas:', relations);
+    
+    // 3. Validar y aplicar las relaciones
+    this.applyCorrelativeRelations(career, relations);
+    
+    // 4. Validar la carrera y establecer el flag 'safe'
+    this.validateAndMarkCareer(career);
+    
+    return career;
+  }
+
+  // Método expuesto para procesar HTML sin validación final
+  static async processHtmlBasic(html: string, url: string): Promise<Career> {
+    // 1. Procesar el HTML base sin correlativas
+    const career = await this.processBasicHtml(html);
+    
+    // 2. Extraer y procesar las relaciones de correlatividad
+    const relations = this.extractCorrelativeRelations(html);
     
     // 3. Validar y aplicar las relaciones
     this.applyCorrelativeRelations(career, relations);
@@ -236,13 +253,13 @@ export class CareerService {
       ];
   
       if (existingRelations.some(Boolean)) {
-        console.warn(`Relación inválida: ${relation.subjectCode} <-> ${relation.correlativeCode}`);
+        // console.warn(`Relación inválida: ${relation.subjectCode} <-> ${relation.correlativeCode}`);
         return;
       }
   
       // Validación 2: Dependencias circulares
       if (hasCircularDependency(relation.subjectCode, relation.correlativeCode)) {
-        console.warn(`Dependencia circular: ${relation.subjectCode} -> ${relation.correlativeCode}`);
+        // console.warn(`Dependencia circular: ${relation.subjectCode} -> ${relation.correlativeCode}`);
         return;
       }
   
@@ -281,5 +298,59 @@ export class CareerService {
         });
       }
     });
+  }
+  
+  // Método público para validar y marcar la carrera
+  static validateAndMarkCareer(career: Career): void {
+    const errors: string[] = [];
+    
+    // Validar campos básicos de carrera
+    if (!career.id || career.id.trim() === '') {
+      errors.push('El ID de la carrera es obligatorio');
+    }
+    
+    if (!career.name || career.name.trim() === '') {
+      errors.push('El nombre de la carrera es obligatorio');
+    }
+    
+    // Validar facultad (prioridad alta)
+    if (!career.faculty.id || career.faculty.id.trim() === '') {
+      errors.push('El ID de la facultad es obligatorio');
+    }
+    
+    if (!career.faculty.name || career.faculty.name.trim() === '') {
+      errors.push('El nombre de la facultad es obligatorio');
+    }
+    
+    // Validar plan
+    if (!career.plan.id || career.plan.id.trim() === '') {
+      errors.push('El ID del plan es obligatorio');
+    }
+    
+    if (!career.plan.year || career.plan.year.trim() === '') {
+      errors.push('El año del plan es obligatorio');
+    }
+    
+    // Validar que haya al menos una materia
+    if (!career.subjects || career.subjects.length === 0) {
+      errors.push('La carrera debe tener al menos una materia');
+    } else {
+      // Validar que las materias tengan la información básica
+      const invalidSubjects = career.subjects.filter(
+        subject => !subject.id || !subject.code || !subject.name
+      );
+      
+      if (invalidSubjects.length > 0) {
+        errors.push(`Hay ${invalidSubjects.length} materias con información incompleta`);
+      }
+    }
+    
+    // Establecer el flag 'safe' basado en las validaciones
+    if (errors.length === 0) {
+      career.safe = true;
+    } else {
+      career.safe = false;
+      console.warn('La carrera no es válida para guardar en la base de datos:', errors);
+    }
   }
 }
