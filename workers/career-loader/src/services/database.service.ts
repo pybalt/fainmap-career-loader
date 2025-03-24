@@ -141,16 +141,21 @@ export class DatabaseService {
         return { data: null, error: null } as SupabaseResult;
       })
       .then((subjectsResult: SupabaseResult) => {
+        // Variable para almacenar los ID de materias, sin importar de dónde vengan
+        let subjectIdMap = new Map<string, number>();
+        
+        // Manejo del error de guardado de subjects
         if (subjectsResult.error) {
           console.error('Error al guardar subjects:', subjectsResult.error);
           
-          // Si es un error de clave duplicada, intentamos recuperar las materias existentes
-          if (subjectsResult.error.code === '23505') {
-            console.log('Detectada colisión de materias, obteniendo materias existentes...');
+          // Si es un error de clave duplicada, recuperamos todas las materias por código
+          if (subjectsResult.error.code === '23505' || subjectsResult.error.message?.includes('duplicate key')) {
+            console.log('Detectada colisión de materias, obteniendo TODAS las materias por código...');
+            
             // Extraer códigos de materia para consultar
             const subjectCodes = subjectsData.map((s: any) => s.code);
             
-            // Consultar materias existentes por código
+            // Consultar TODAS las materias existentes por sus códigos
             return this.buscarMateriasPorCodigo(subjectCodes)
               .then(existingSubjectsResult => {
                 if (existingSubjectsResult.error) {
@@ -158,68 +163,125 @@ export class DatabaseService {
                   return Promise.resolve({ data: null, error: existingSubjectsResult.error } as SupabaseResult);
                 }
                 
-                console.log(`Recuperadas ${existingSubjectsResult.data?.length || 0} materias existentes`);
-                return Promise.resolve({ 
-                  data: existingSubjectsResult.data, 
-                  error: null 
-                } as SupabaseResult);
+                console.log(`Recuperadas ${existingSubjectsResult.data?.length || 0} materias existentes de ${subjectCodes.length} solicitadas`);
+                
+                // Verificar que se recuperaron materias
+                if (!existingSubjectsResult.data || existingSubjectsResult.data.length === 0) {
+                  console.warn('No se pudieron recuperar materias existentes, saltando la inserción de career_subjects');
+                  return Promise.resolve({ 
+                    data: { career: career, subjectsInserted: 0, relationsInserted: 0 }, 
+                    error: null 
+                  } as SupabaseResult);
+                }
+                
+                // Mapear subjects con IDs recuperados
+                existingSubjectsResult.data.forEach((subject: any) => {
+                  console.log(`Mapeando code recuperado '${subject.code}' al ID ${subject.subjectid}`);
+                  subjectIdMap.set(subject.code, subject.subjectid);
+                });
+                
+                // Verificar si faltan materias
+                const codigosRecuperados = new Set(existingSubjectsResult.data.map((s: any) => s.code));
+                const materiasFaltantes = validSubjects.filter(s => !codigosRecuperados.has(s.code));
+                
+                if (materiasFaltantes.length > 0) {
+                  console.warn(`Faltan ${materiasFaltantes.length} materias en los datos recuperados:`);
+                  materiasFaltantes.forEach(s => console.warn(`- Falta: ${s.code} (${s.name})`));
+                  
+                  // Intentar insertar las materias faltantes una por una
+                  const insertarMateriasFaltantes = async () => {
+                    for (const materia of materiasFaltantes) {
+                      try {
+                        console.log(`Intentando insertar materia individual: ${materia.code}`);
+                        const { data, error } = await this.supabase
+                          .from('subjects')
+                          .upsert({ code: materia.code, name: materia.name })
+                          .select();
+                          
+                        if (error) {
+                          console.warn(`Error al insertar materia ${materia.code}, intentando recuperarla:`, error);
+                          // Si falla, intentamos recuperarla directamente
+                          const { data: fetchedData } = await this.buscarMateriasPorCodigo([materia.code]);
+                          if (fetchedData && fetchedData.length > 0) {
+                            console.log(`Recuperada materia existente ${materia.code} con ID ${fetchedData[0].subjectid}`);
+                            subjectIdMap.set(materia.code, fetchedData[0].subjectid);
+                          }
+                        } else if (data && data.length > 0) {
+                          console.log(`Insertada materia individual ${materia.code} con ID ${data[0].subjectid}`);
+                          subjectIdMap.set(materia.code, data[0].subjectid);
+                        }
+                      } catch (err) {
+                        console.error(`Error al procesar materia ${materia.code}:`, err);
+                      }
+                    }
+                    return subjectIdMap;
+                  };
+                  
+                  return insertarMateriasFaltantes().then(() => {
+                    console.log(`Mapa final de materias contiene ${subjectIdMap.size} entradas`);
+                    return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
+                  });
+                }
+                
+                // Continuar con el procesamiento de relaciones
+                return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
               });
           }
           
+          // Para cualquier otro tipo de error
           return Promise.resolve({ data: null, error: subjectsResult.error } as SupabaseResult);
         }
 
-        // Log cuántos subjects se insertaron realmente
+        // Si no hubo error, procesamos las materias que se insertaron correctamente
         console.log(`Subjects guardados correctamente. Datos retornados:`, 
           subjectsResult.data ? `${subjectsResult.data.length} registros` : 'Sin datos');
         
-        // Diagnóstico completo de los datos retornados
-        console.log('Estructura completa de datos retornados por Supabase:');
-        console.log(JSON.stringify(subjectsResult, null, 2));
-
         // Verificar que subjects sean válidos antes de continuar
         if (!subjectsResult.data || subjectsResult.data.length === 0) {
-          console.warn('No se insertaron subjects, saltando la inserción de career_subjects');
-          return Promise.resolve({ 
-            data: { career: career, subjectsInserted: 0, relationsInserted: 0 }, 
-            error: null 
-          } as SupabaseResult);
+          console.warn('No se obtuvieron subjects de la base de datos, recuperando todas las materias por código');
+          
+          // Recuperar todas las materias por código
+          const subjectCodes = subjectsData.map((s: any) => s.code);
+          
+          return this.buscarMateriasPorCodigo(subjectCodes)
+            .then(allSubjectsResult => {
+              if (!allSubjectsResult.data || allSubjectsResult.data.length === 0) {
+                console.warn('No se pudieron recuperar materias, saltando la inserción de career_subjects');
+                return Promise.resolve({ 
+                  data: { career: career, subjectsInserted: 0, relationsInserted: 0 }, 
+                  error: null 
+                } as SupabaseResult);
+              }
+              
+              console.log(`Recuperadas ${allSubjectsResult.data.length} materias para continuar el proceso`);
+              
+              // Mapear subjects con IDs
+              allSubjectsResult.data.forEach((subject: any) => {
+                console.log(`Mapeando code '${subject.code}' al ID ${subject.subjectid}`);
+                subjectIdMap.set(subject.code, subject.subjectid);
+              });
+              
+              return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
+            });
         }
 
-        // 4. Procesar y guardar relaciones carrera-materia
+        // 4. Procesar y guardar relaciones carrera-materia con las materias insertadas
         console.log(`Preparando relaciones carrera-materia para ${validSubjects.length} materias válidas...`);
 
-        // Diagnóstico de las materias de entrada
-        console.log('Códigos de materias originales:');
-        validSubjects.forEach(s => console.log(`- ${s.code}`));
-
-        // Diagnóstico de las materias retornadas
-        console.log('Códigos de materias retornados por Supabase:');
-        subjectsResult.data.forEach((s: any) => console.log(`- ${s.code} (ID: ${s.subjectid})`));
-
-        // En mapear subjects con IDs
-        const subjectIdMap = new Map<string, number>();
-        console.log(`Datos recibidos de la consulta: ${subjectsResult.data.length} materias`);
-        console.log('Primeros 3 registros de la consulta:', JSON.stringify(subjectsResult.data.slice(0, 3), null, 2));
+        // Asociamos cada código de materia con su ID real en la base de datos
+        subjectsResult.data.forEach((subject: any) => {
+          console.log(`Mapeando code '${subject.code}' al ID ${subject.subjectid}`);
+          subjectIdMap.set(subject.code, subject.subjectid);
+        });
         
-        // Verificar si faltan materias
+        // Verificar si faltan materias que no se insertaron
         const codigosInsertados = new Set(subjectsResult.data.map((s: any) => s.code));
         const materiasFaltantes = validSubjects.filter(s => !codigosInsertados.has(s.code));
         
         if (materiasFaltantes.length > 0) {
-          console.warn(`Faltan ${materiasFaltantes.length} materias en la respuesta de Supabase:`);
-          materiasFaltantes.forEach(s => console.warn(`- Falta: ${s.code} (${s.name})`));
+          console.warn(`Faltan ${materiasFaltantes.length} materias en la respuesta. Recuperando...`);
           
-          // Intentar una consulta directa para las materias faltantes
-          console.log('Realizando consulta adicional para las materias faltantes...');
-          
-          // Cargamos primero las materias que sí tenemos
-          subjectsResult.data.forEach((subject: any) => {
-            console.log(`Mapeando code '${subject.code}' al ID ${subject.subjectid}`);
-            subjectIdMap.set(subject.code, subject.subjectid);
-          });
-          
-          // Ahora intentamos recuperar las materias faltantes
+          // Recuperar las materias faltantes
           const codigosFaltantes = materiasFaltantes.map(s => s.code);
           return this.buscarMateriasPorCodigo(codigosFaltantes)
             .then(materiasFaltantesResult => {
@@ -231,19 +293,11 @@ export class DatabaseService {
                   console.log(`Mapeando code adicional '${subject.code}' al ID ${subject.subjectid}`);
                   subjectIdMap.set(subject.code, subject.subjectid);
                 });
-              } else {
-                console.warn('No se pudieron recuperar las materias faltantes');
               }
               
               return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
             });
         }
-        
-        // Asociamos cada código de materia con su ID real en la base de datos
-        subjectsResult.data.forEach((subject: any) => {
-          console.log(`Mapeando code '${subject.code}' al ID ${subject.subjectid}`);
-          subjectIdMap.set(subject.code, subject.subjectid);
-        });
 
         return this.continuarProcesamientoRelaciones(career, careerId, validSubjects, subjectIdMap, errors);
       })
