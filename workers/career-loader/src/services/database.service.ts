@@ -135,7 +135,7 @@ export class DatabaseService {
           console.log(`Insertando ${subjectsData.length} materias...`);
           return this.supabase
             .from('subjects')
-            .upsert(subjectsData)
+            .upsert(subjectsData, { onConflict: 'code', ignoreDuplicates: true })
             .select();
         }
         return { data: null, error: null } as SupabaseResult;
@@ -143,6 +143,29 @@ export class DatabaseService {
       .then((subjectsResult: SupabaseResult) => {
         if (subjectsResult.error) {
           console.error('Error al guardar subjects:', subjectsResult.error);
+          
+          // Si es un error de clave duplicada, intentamos recuperar las materias existentes
+          if (subjectsResult.error.code === '23505') {
+            console.log('Detectada colisión de materias, obteniendo materias existentes...');
+            // Extraer códigos de materia para consultar
+            const subjectCodes = subjectsData.map((s: any) => s.code);
+            
+            // Consultar materias existentes por código
+            return this.buscarMateriasPorCodigo(subjectCodes)
+              .then(existingSubjectsResult => {
+                if (existingSubjectsResult.error) {
+                  console.error('Error al recuperar materias existentes:', existingSubjectsResult.error);
+                  return Promise.resolve({ data: null, error: existingSubjectsResult.error } as SupabaseResult);
+                }
+                
+                console.log(`Recuperadas ${existingSubjectsResult.data?.length || 0} materias existentes`);
+                return Promise.resolve({ 
+                  data: existingSubjectsResult.data, 
+                  error: null 
+                } as SupabaseResult);
+              });
+          }
+          
           return Promise.resolve({ data: null, error: subjectsResult.error } as SupabaseResult);
         }
 
